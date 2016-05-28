@@ -1,0 +1,55 @@
+[FOLDERS]
+#These are the default folders for the GUI version. If using the command line, they have no effect.
+NEW_RUNS_FOLDER=/home/mauro
+COMPLETED_RUNS_FOLDER=/home/mauro/Desktop/QCtool/QC_out
+
+
+[EXECUTABLES AND OPTIONS]
+#Every program must have a 'path'. Other oprions for each program can be added, preferably using the 'extended' flag (the one with double dash), 
+#and they will be included in the execution (e.g.: '--conf')
+  
+    [[FastQC]]
+	path=/usr/local/bin/fastqc
+
+    [[FastQScreen]]
+	path=/usr/local/bin/fastq_screen
+	conf=/home/mtruglio/Desktop/QCtool/genomes/fastq_screen.conf
+
+    [[SolexaQA++]]
+	path=/usr/local/bin/SolexaQA++
+	probcutoff=0.05
+	summary_script_path=/home/mtruglio/Desktop/QCtool/utils/cumulative_summary.py
+
+    [[PhiX and adapters removal]]
+	# Bowtie path
+	path_bowtie2=/usr/local/bin/bowtie2
+
+	# Bowtie-built index for PhiX
+	x=/home/mtruglio/Desktop/QCtool/genomes/phix/phiX
+
+	# Other paths
+	path_samtools=/usr/local/bin/samtools
+	path_picard=/usr/local/bin/picard
+	path_fastq-mcf=/usr/local/bin/fastq-mcf
+	adapters_list=/home/mtruglio/Desktop/QCtool/genomes/contaminants/contams_forward_rev.fa
+
+    [[Amplicons FLASH test]]
+	path_FLASH=/usr/local/bin/flash
+	p_cutoff=0.05
+	log_parser_path=/home/mtruglio/Desktop/QCtool/utils/flash_log_parser.py
+
+    [[Amplicons VSEARCH test]]
+	path_vsearch=/usr/bin/vsearch
+	fastq_truncqual=3
+	fastq_minmergelen=200
+	
+    [[GBS demultiplexing]]
+	path_gbsx=/usr/share/java/gbsx/GBSX_v1.2.jar
+
+    [[Reads trimming]]
+	path=/usr/local/bin/SolexaQA++
+	trim_p=0.01
+
+    [[GC content]]
+	path=/home/mtruglio/Desktop/QCtool/utils/gc.py
+
