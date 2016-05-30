@@ -886,17 +886,6 @@ cp `ls %s/QCdata/GC_content/*.pdf | head -2` %s/images
                 cmd_file.write('''
 cd %s; find ./ -name md5checksums.txt | while read line; do echo "md5sum -c $line" >> checksum.sh; done; chmod +x checksum.sh
 cd %s/images/
-for fname in *; do
-  name="${fname%%\.*}"
-  extension="${fname#$name}"
-  newname="${name//./-}"
-  newname="${newname//_/-}"  
-  newfname="$newname""$extension"
-  if [ "$fname" != "$newfname" ]; then
-    echo mv "$fname" "$newfname"
-    mv "$fname" "$newfname"
-  fi
-done
 cd $maindir
 echo "Completed QC analysis on $(date '+%%a %%b %%d %%H:%%M:%%S %%Y')" >> %s/checkPoint2done.txt
 rm -r %s/%s.txt
