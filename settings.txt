@@ -1,6 +1,6 @@
 [FOLDERS]
 #These are the default folders for the GUI version. If using the command line, they have no effect.
-NEW_RUNS_FOLDER=/home/mauro
+NEW_RUNS_FOLDER=/home/mauro/Desktop
 COMPLETED_RUNS_FOLDER=/home/mauro/Desktop/QCtool/QC_out
 
 
@@ -9,47 +9,47 @@ COMPLETED_RUNS_FOLDER=/home/mauro/Desktop/QCtool/QC_out
 #and they will be included in the execution (e.g.: '--conf')
   
     [[FastQC]]
-	path=/usr/local/bin/fastqc
+	path=utils/FastQC/fastqc
 
     [[FastQScreen]]
-	path=/usr/local/bin/fastq_screen
-	conf=/home/mtruglio/Desktop/QCtool/genomes/fastq_screen.conf
+	path=utils/fastq_screen
+	conf=genomes/fastq_screen.conf
 
     [[SolexaQA++]]
-	path=/usr/local/bin/SolexaQA++
+	path=utils/SolexaQA++
 	probcutoff=0.05
-	summary_script_path=/home/mtruglio/Desktop/QCtool/utils/cumulative_summary.py
+	summary_script_path=utils/cumulative_summary.py
 
     [[PhiX and adapters removal]]
 	# Bowtie path
-	path_bowtie2=/usr/local/bin/bowtie2
+	path_bowtie2=utils/bowtie2/bowtie2
 
 	# Bowtie-built index for PhiX
-	x=/home/mtruglio/Desktop/QCtool/genomes/phix/phiX
+	x=genomes/phix/phiX
 
 	# Other paths
-	path_samtools=/usr/local/bin/samtools
-	path_picard=/usr/local/bin/picard
-	path_fastq-mcf=/usr/local/bin/fastq-mcf
-	adapters_list=/home/mtruglio/Desktop/QCtool/genomes/contaminants/contams_forward_rev.fa
+	path_samtools=utils/samtools
+	path_picard=utils/picard
+	path_fastq-mcf=utils/fastq-mcf
+	adapters_list=genomes/contaminants/contams_forward_rev.fa
 
     [[Amplicons FLASH test]]
-	path_FLASH=/usr/local/bin/flash
+	path_FLASH=utils/flash
 	p_cutoff=0.05
-	log_parser_path=/home/mtruglio/Desktop/QCtool/utils/flash_log_parser.py
+	log_parser_path=utils/flash_log_parser.py
 
     [[Amplicons VSEARCH test]]
-	path_vsearch=/usr/bin/vsearch
+	path_vsearch=utils/vsearch
 	fastq_truncqual=3
 	fastq_minmergelen=200
 	
     [[GBS demultiplexing]]
-	path_gbsx=/usr/share/java/gbsx/GBSX_v1.2.jar
+	path_gbsx=utils/GBSX_v1.2.jar
 
     [[Reads trimming]]
-	path=/usr/local/bin/SolexaQA++
+	path=utils/SolexaQA++
 	trim_p=0.01
 
     [[GC content]]
-	path=/home/mtruglio/Desktop/QCtool/utils/gc.py
+	path=utils/gc.py
 

@@ -1,0 +1,1028 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Getopt::Long;
+use FindBin qw($RealBin);
+use File::Copy;
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use File::Temp qw/ tempfile tempdir /;
+use Data::Dumper;
+
+our $VERSION = "0.5.2";
+
+###########################################################################
+###########################################################################
+##                                                                       ##
+## Copyright 2015, Simon Andrews  (simon.andrews@babraham.ac.uk)         ##
+##                 Mark Fiers     (Plant & Food Research, NZ)            ##
+##                 Steven Wingett (steven.wingett@babraham.ac.uk)        ##
+##                                                                       ##
+## This program is free software: you can redistribute it and/or modify  ##
+## it under the terms of the GNU General Public License as published by  ##
+## the Free Software Foundation, either version 3 of the License, or     ##
+## (at your option) any later version.                                   ##
+##                                                                       ##
+## This program is distributed in the hope that it will be useful,       ##
+## but WITHOUT ANY WARRANTY; without even the implied warranty of        ##
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         ##
+## GNU General Public License for more details.                          ##
+##                                                                       ##
+## You should have received a copy of the GNU General Public License     ##
+## along with this program.  If not, see <http://www.gnu.org/licenses/>. ##
+###########################################################################
+###########################################################################
+
+unless (@ARGV) {    #Display a help message if no arguments specified
+    print while (<DATA>);
+    exit(0);
+}
+
+## Option variables
+my $subset_count = 100000;
+my $outdir;
+my $illumina;
+my $quiet;
+my $help;
+my $version;
+my $threads;
+my $color;
+my $conf;
+my $bowtie_opts;
+my $bowtie2_opts;
+my $nohits;
+my $nohits_zip_output = 0;
+my $aligner;
+my $force;
+my $paired;
+
+my $config_result = GetOptions(
+    "subset=i"    => \$subset_count,
+    "outdir=s"    => \$outdir,
+    "illumina1_3" => \$illumina,
+    "quiet"       => \$quiet,
+    "help"        => \$help,
+    "version"     => \$version,
+    "conf=s"      => \$conf,
+    "color"       => \$color,
+    "bowtie=s"    => \$bowtie_opts,
+    "bowtie2=s"   => \$bowtie2_opts,
+    "threads=i"   => \$threads,
+    "nohits"      => \$nohits,
+    "aligner=s"   => \$aligner,
+    "force"       => \$force,
+    "paired"      => \$paired,
+);
+
+die "Could not parse options, please adjust configuration.\n" unless ($config_result);
+
+if ($help) {
+    print while (<DATA>);
+    exit;
+}
+
+if ($version) {
+    print "fastq_screen v$VERSION\n";
+    exit;
+}
+
+if ($color) {
+    $color = '-C';
+} else {
+    $color = '';
+}
+
+if ( defined $aligner ) {
+    $aligner = lc $aligner;
+    if ( ( $aligner ne 'bowtie' ) and ( $aligner ne 'bowtie2' ) ) {
+        die "Valid options for --aligner are 'bowtie' or 'bowtie2' only.\n";
+    } elsif ( ( $aligner eq 'bowtie' ) and ( defined $bowtie2_opts ) ) {
+        die "Bowtie selected as the aligner yet bowtie2 options specified.\n";
+    } elsif ( ( $aligner eq 'bowtie2' ) and ( defined $bowtie_opts ) ) {
+        die "Bowtie 2 selected as the aligner yet bowtie options specified.\n";
+    }
+}
+
+$bowtie_opts  = '' unless ($bowtie_opts);     # Get undef warning otherwise
+$bowtie2_opts = '' unless ($bowtie2_opts);    # Get undef warning otherwise
+
+# Configuration
+my $number_of_threads = 1;
+my $path_to_bowtie    = 'bowtie';
+my $path_to_bowtie2   = 'bowtie2';
+my @libraries;
+
+warn "Using fastq_screen v$VERSION\n" unless ($quiet);
+
+if ($paired) {
+    warn "Attention: option --paired removed in fastq_sreen v0.5.0, processing data in single-end mode\n";
+}
+
+if ($subset_count) {
+    warn "Option --subset set to $subset_count reads\n" unless ($quiet);
+} else {
+    warn "Option --subset set to 0: processing all reads in FASTQ files\n" unless ($quiet);
+}
+
+load_configuration($conf);
+
+# Override the configuration default if they've
+# manually specified a number of threads to use
+$number_of_threads = $threads if ($threads);
+
+unless (@libraries) {
+    die "No reference genomes were configured, please adjust configuration.\n";
+}
+
+if ( ( ( 1 << 32 ) != 4294967296 ) and ( scalar @libraries > 15 ) ) {    #32-bit
+    die "Maximum number of reference genomes exceeded for 32-bit Perl, please adjust configuration and specify at most 15 libraries.\n";
+} elsif ( scalar @libraries > 32 ) {                                     #64-bit
+    die "Maximum number of reference genomes exceeded, please adjust configuration and specify at most 32 libraries.\n";
+}
+
+my @files = remove_duplicates(@ARGV);
+
+die "No files to process\n" unless (@files);
+
+my $index = 0;
+while ( $index <= $#files ) {
+    process_file( $files[$index] );
+    $index++;
+}
+
+sub process_file {
+
+    my ($file) = @_;
+    my @index_genomes;    # Stores the hits to each genome
+
+    warn "Processing $file\n" unless ($quiet);
+
+    # Check that we can actually find the files we're working with
+    unless ( -e $file ) {
+        warn "Couldn't locate file $file - skipping\n";
+        return;
+    }
+
+    #If the --no_hits option is selected, decide whether the output should be
+    #be compressed by assessing whether the input is compressed
+    if ( $file =~ /\.gz$/ ) {
+        $nohits_zip_output = 1;
+    }
+
+    # Work out the output file name we're going to use
+    my $outfile = $file;
+    $outfile =~ s/\.gz$//;
+    $outfile =~ s/\.(txt|seq|fastq|fq)$//i;
+
+    # We can try to remove the end specific part of the name
+    # if they're using standard Illumina naming. It doesn't
+    # really matter if this fails
+    $outfile .= "_screen.txt";
+
+    if ($outdir) {
+        $outfile = ( split( /\//, $outfile ) )[-1];
+        $outfile = $outdir . "/" . $outfile;
+    }
+
+    if ( -e $outfile and !$force ) {
+        warn "Output file $outfile already exists - skipping\n";
+        return;
+    }
+
+    open( OUT, '>', $outfile ) or do {
+        warn "Couldn't write to $outfile: $!";
+        return;
+    };
+
+    #Print out the Version and other information to the output file
+    if ($subset_count) {
+        print OUT "#Fastq_screen version: $VERSION\t#Reads in subset: $subset_count\n";
+    } else {
+        print OUT "#Fastq_screen version: $VERSION\tProcessing all reads in FASTQ files\n";
+    }
+
+    #Print the headers to the output file
+    print OUT join( "\t", ( 'Genome', '#Reads_processed', '#Unmapped', '%Unmapped', '#One_hit_one_genome', '%One_hit_one_genome', '#Multiple_hits_one_genome', '%Multiple_hits_one_genome', '#One_hit_multiple_genomes', '%One_hit_multiple_genomes', 'Multiple_hits_multiple_genomes', '%Multiple_hits_multiple_genomes' ) ), "\n";
+
+    my $temp_file;
+    my $read_length = get_read_length($file);
+
+    if ( $read_length < 0 ) {
+        warn "Failed to calculate read length from $file";
+        return;
+    }
+
+    if ( $read_length < 20 ) {
+        warn "Ignoring reads shorter than 20bp\n";
+        $read_length = 20;
+    }
+
+    # We don't use a seed of >40 even if the reads are that long
+    $read_length = 40 if ( $read_length > 40 );
+
+    # Count the sequences in the file.
+    # We need to make a subset of these sequences
+    # First we need to count how many sequences are in the original file
+    my $seqcount = 0;
+
+    if ($subset_count) {
+        warn "Counting sequences in $file\n" unless ($quiet);
+    }
+
+    #Check if the read file is compressed and open accordingly
+    if ( $file =~ /\.gz$/ ) {
+        open( IN, "zcat \'$file\' |" ) or do {
+            warn "Can't read $file: $!";
+            return;
+        };
+    } else {
+        open( IN, $file ) or do {
+            warn "Can't read $file: $!";
+            return;
+        };
+    }
+
+    ++$seqcount while (<IN>);
+    $seqcount = int( $seqcount / 4 );
+    my $interval;
+
+    if ( $subset_count and $seqcount > $subset_count * 2 ) {    # We actually need to do the reduction
+        $interval = sprintf( "%.0f", ( $seqcount / $subset_count ) );
+        warn "Making reduced seq file with ratio $interval:1\n" unless ($quiet);
+    } else {                                                    #Make new indexed file with no reduction
+        $interval = 1;
+        if ($subset_count) {
+            warn "Not making subset of $subset_count since $seqcount actual sequences is too low or close enough\n" unless ($quiet);
+        }
+    }
+
+    $temp_file = $file;
+    $temp_file .= "_temp_subset.txt";
+
+    # Since we're writing we need to do it in
+    # the directory we know we're allowed to write
+    # to.
+    if ($outdir) {
+        $temp_file = ( split( /\//, $temp_file ) )[-1];
+        $temp_file = $outdir . "/" . $temp_file;
+    }
+
+    open( TEMP, '>', $temp_file ) or do {
+        warn "Can't write temp subset file: $!";
+        return;
+    };
+
+    #Move back to the start of the file.  The Seek function will not work if reading the file using zcat, so
+    #close and open the file to move back to the start.
+    close IN;
+    if ( $file =~ /\.gz$/ ) {
+        open( IN, "zcat \'$file\' |" ) or do {
+            warn "Can't read $file: $!";
+            return;
+        };
+    } else {
+        open( IN, $file ) or do {
+            warn "Can't read $file: $!";
+            return;
+        };
+    }
+
+    my $current_count  = 0;
+    my $readsprocessed = 0;    # Stores the total number of sequences searched - initialise at 0 to match array index
+    while (<IN>) {
+        if (/^@/) {
+            my $record = $_;
+            $record = substr( $record, 1 );
+            $record = '@' . "$readsprocessed.$record";    #Begin header with index
+            $record .= scalar <IN>;
+            $record .= scalar <IN>;
+            $record .= scalar <IN>;
+
+            if ( $current_count % $interval == 0 ) {
+                print TEMP $record;
+                ++$readsprocessed;
+            }
+            ++$current_count;
+        }
+    }
+
+    close(TEMP) or do {
+        warn "Can't write temp subset file: $!";
+        return;
+    };
+
+    $file = $temp_file;
+
+    my $library_index = -1;    # Make lists in the same order as @libraries
+    foreach my $library (@libraries) {
+
+        #Write Bowtie/Bowtie2 Standard Error to a temporary output file
+        #Generate a random filename and place in $outdir (if specified)
+        my $error_fh;
+        my $error_filename;
+        if ($outdir) {
+            ( $error_fh, $error_filename ) = tempfile( 'aligner_standard_error.XXXXXXXX', SUFFIX => '.txt', DIR => $outdir );
+        } else {
+            ( $error_fh, $error_filename ) = tempfile( 'aligner_standard_error.XXXXXXXX', SUFFIX => '.txt' );
+        }
+
+        warn "Searching $file against $library->[0]\n" unless ($quiet);
+
+        my $illumina_flag = '';
+        $illumina_flag = "--phred64-quals" if ($illumina);
+
+        my $bowtie_command;
+
+        #Count the index of the library being used
+        $library_index++;
+
+        #Determine whether to execute bowtie1 or bowtie2
+        if ( $aligner eq 'bowtie' ) {
+            $bowtie_command = "$path_to_bowtie $bowtie_opts $illumina_flag $color -l $read_length -k 2 --chunkmbs 512 -p $number_of_threads $library->[1] \'$file\' 2>$error_filename |";
+        } else {    #Using Bowtie2
+            $bowtie_command = "$path_to_bowtie2 $bowtie2_opts $illumina_flag -k 2 --very-fast-local --no-hd --no-unal -p $number_of_threads -x $library->[1] -U \'$file\' 2>$error_filename |";
+        }
+
+        open( BOWTIE, $bowtie_command ) or die "Failed to launch bowtie command '$bowtie_command': $!";
+
+        my $seqname_suffix = 1;    #Explained below
+        while (<BOWTIE>) {
+
+            my $line = $_;
+            chomp $line;
+
+            #Check output is in native original bowtie format or SAM format
+            unless ( ( $line =~ /^.+\t[\+\-]\t.+\t.+\t[TAGCN]+\t.+/ ) or ( $line =~ /^.+\t\d+\t\S+\t\d+\t\d+\t\S+\t.+\t\d+\t\S+\t[ATCGN]+\t.+/ ) ) {
+
+                # This is a progress message coming from stderr
+                warn "Bowtie/Bowtie2 output not in correct format: $_\n";
+                next;
+            }
+
+            my ($seqname) = split( /\./, $line );    #Extract the index id
+            unless ( defined $index_genomes[$seqname] ) {
+                $index_genomes[$seqname] = 0;        #Initialise - array may have 'gaps'
+            }
+            $index_genomes[$seqname] = record_hit( $index_genomes[$seqname], $library_index + 1 );
+        }
+
+        #Check the Standard Error output file and report any errors
+        #Bowtie reports the alignment summary to standard error, so ignore the alignment summary
+        while (<$error_fh>) {
+            unless ( /^\#/ or /^Reported/ or /^No alignments/ or /reads; of these/ or /were unpaired; of these/ or /aligned/ or /overall alignment rate/ or /mates make up the pairs; of these/ or /were paired; of these/ or /----/ ) {
+                warn "Bowtie/Bowtie2 warning: $_";
+            }
+        }
+        close $error_fh;
+        unlink $error_filename or die "Could not delete temporary Standard Error file '$error_filename' : $!";
+    }
+
+    # Collate the hit results from the Bowtie searches.
+    # Result categories are:
+    # 0 - read not map to library
+    # 1 - read maps uniquely to this library but maps to no others
+    # 2 - read multi-maps to this library but maps to no others
+    # 3 - read maps uniquely to this library and maps to at least one other library
+    # 4 - read multi-maps to this library and maps to at least one other library
+    my @one_hit_one_library;
+    my @one_hit_multiple_libraries;
+    my @multiple_hits_one_library;
+    my @multiple_hits_multiple_libraries;
+
+    # Initialise those arrays with zero values, making them the same length as @libraries
+    for my $position ( 0 .. $#libraries ) {    #$position is 0-based
+        $one_hit_one_library[$position]              = 0;
+        $one_hit_multiple_libraries[$position]       = 0;
+        $multiple_hits_one_library[$position]        = 0;
+        $multiple_hits_multiple_libraries[$position] = 0;
+    }
+
+    for my $val (@index_genomes) {
+        for my $position ( 0 .. $#libraries ) {
+            $val = 0 unless ( defined $val );    #May not be defined yet
+            my $mapping_result = maps_which_library( $val, $position + 1 );    #maps_which_library uses 1-based numbering for libraries
+            if ( $mapping_result == 0 ) {
+                next;                                                          #Did not map to this genome
+            } elsif ( $mapping_result == 1 ) {
+                $one_hit_one_library[$position]++;
+            } elsif ( $mapping_result == 2 ) {
+                $multiple_hits_one_library[$position]++;
+            } elsif ( $mapping_result == 3 ) {
+                $one_hit_multiple_libraries[$position]++;
+            } elsif ( $mapping_result == 4 ) {
+                $multiple_hits_multiple_libraries[$position]++;
+            }
+
+        }
+    }
+
+    # Summarise the counts and write the text report
+    foreach my $index ( 0 .. $#libraries ) {
+        my $library = $libraries[$index];
+
+        my $percent_one_hit_one_library = ( $one_hit_one_library[$index] / $readsprocessed ) * 100;
+        $percent_one_hit_one_library = sprintf( "%.2f", $percent_one_hit_one_library );
+
+        my $percent_one_hit_multiple_libraries = ( $one_hit_multiple_libraries[$index] / $readsprocessed ) * 100;
+        $percent_one_hit_multiple_libraries = sprintf( "%.2f", $percent_one_hit_multiple_libraries );
+
+        my $percent_multiple_hits_one_library = ( $multiple_hits_one_library[$index] / $readsprocessed ) * 100;
+        $percent_multiple_hits_one_library = sprintf( "%.2f", $percent_multiple_hits_one_library );
+
+        my $percent_multiple_hits_multiple_libraries = ( $multiple_hits_multiple_libraries[$index] / $readsprocessed ) * 100;
+        $percent_multiple_hits_multiple_libraries = sprintf( "%.2f", $percent_multiple_hits_multiple_libraries );
+
+        my $percent_unmapped = 100 - $percent_one_hit_one_library - $percent_one_hit_multiple_libraries - $percent_multiple_hits_one_library - $percent_multiple_hits_multiple_libraries;
+        $percent_unmapped = sprintf( "%.2f", $percent_unmapped );
+
+        my $reads_unmapped = $readsprocessed - $one_hit_one_library[$index] - $one_hit_multiple_libraries[$index] - $multiple_hits_one_library[$index] - $multiple_hits_multiple_libraries[$index];
+
+        print OUT join( "\t", ( $library->[0], $readsprocessed, $reads_unmapped, $percent_unmapped, $one_hit_one_library[$index], $percent_one_hit_one_library, $multiple_hits_one_library[$index], $percent_multiple_hits_one_library, $one_hit_multiple_libraries[$index], $percent_one_hit_multiple_libraries, $multiple_hits_multiple_libraries[$index], $percent_multiple_hits_multiple_libraries ) ), "\n";
+    }
+
+    #Calculate the number of reads that mapped to none of the libraries
+    my $hit_no_genomes = 0;
+    foreach my $val (@index_genomes) {
+        $hit_no_genomes++ unless ($val);
+    }
+    my $percent_hit_no_libraries = ( $hit_no_genomes / $readsprocessed ) * 100;
+    $percent_hit_no_libraries = sprintf( "%.2f", $percent_hit_no_libraries );
+    print OUT "\n\%Hit_no_genomes: $percent_hit_no_libraries\n";
+
+    close IN;
+    close OUT or die "Coudn't write to $outfile: $!";
+
+    if ($nohits) {
+        find_no_hits( \@index_genomes, $file, $outfile );
+    }
+
+    unlink($temp_file) or warn "Unable to delete temp file '$temp_file'" if ($temp_file);
+
+    #Check whether the module GD::Graph is installed
+    eval {
+        require GD::Graph::bars;
+        GD::Graph::pie->import();
+    };
+
+    unless ($@) {
+        make_graph($outfile);
+    } else {
+        warn "Perl module GD::Graph::bars not installed, skipping charts\n";
+    }
+}
+
+warn "Processing complete\n" unless ($quiet);
+
+#####################################################################################################
+#Subroutines
+#####################################################################################################
+
+sub remove_duplicates {
+    my @array = @_;
+    my %hash;
+
+    foreach my $element (@array) {
+        $hash{$element} = '';
+    }
+
+    @array = keys(%hash);
+    return @array;
+}
+
+sub load_configuration {
+
+    # Find the config file
+
+    my ($conf_file) = @_;
+
+    # If they haven't specified a conf file then look
+    # in the directory containing the program.
+    $conf_file = "$RealBin/fastq_screen.conf" unless ($conf_file);
+
+    unless ( -e $conf_file ) {
+        die "Couldn't find fastq_screen.conf at '$conf_file'\n";
+    }
+
+    if ($color) {    #Bowtie2 cannot process colorspace reads
+        if ( !defined $aligner ) {
+            warn "Setting --aligner to orignal Bowtie since Bowtie2 cannot process colorspace reads";
+            $aligner = 'bowtie';
+        } elsif ( $aligner eq 'bowtie2' ) {
+            die "Bowtie2 cannot process colorspace reads, please adjust the configuration file to use the original Bowtie\n";
+        }
+    }
+
+    warn "Reading configuration from '$conf_file'\n" unless ($quiet);
+
+    open( CONF, $conf_file ) or die "Can't read $conf_file : $!";
+
+    #Determine aligner to use from 1) paths specified and 2) databases if no aligner specified
+    if ( !defined $aligner ) {
+        my $bowtie1_path_exists     = 0;
+        my $bowtie2_path_exists     = 0;
+        my $bowtie1_database_exists = 0;
+        my $bowtie2_database_exists = 0;
+
+        while (<CONF>) {
+            chomp;
+            s/^\s+//;
+            s/\s+$//;
+
+            next if (/^\#/);
+            next unless ($_);
+
+            my ($name) = split(/\s+/);
+
+            if ( $name eq 'BOWTIE' ) {
+                if ( defined( ( split( /\s+/, $_, 2 ) )[1] ) ) {
+                    $bowtie1_path_exists = 1;
+                }
+            } elsif ( $name eq 'BOWTIE2' ) {
+                if ( defined( ( split( /\s+/, $_, 2 ) )[1] ) ) {
+                    $bowtie2_path_exists = 1;
+                }
+            } elsif ( $name eq 'DATABASE' ) {
+                my ( undef, undef, $database_path ) = split( /\s+/, $_, 4 );
+
+                if ( -e "$database_path.1.ebwt" ) {
+                    $bowtie1_database_exists = 1;
+                }
+                if ( -e "$database_path.1.bt2" or -e "$database_path.1.bt2l" ) {
+                    $bowtie2_database_exists = 1;
+                }
+            }
+        }
+
+        #Is bowtie or bowtie2 in path?
+        unless ( system "which bowtie >/dev/null 2>&1" ) {
+            $bowtie1_path_exists = 1;
+        }
+        unless ( system "which bowtie2 >/dev/null 2>&1" ) {
+            $bowtie2_path_exists = 1;
+        }
+
+        #Decide whether to proceed and display message
+        if ( $bowtie1_path_exists and $bowtie2_path_exists and $bowtie1_database_exists and $bowtie2_database_exists ) {
+            $aligner = 'bowtie2';
+            warn "Aligner (--aligner) not specified. Paths to both bowtie and bowtie2 identified; bowtie and bowtie2 databases both present: defaulting to bowtie2\n";
+        } elsif ( $bowtie2_path_exists and $bowtie2_database_exists ) {
+            $aligner = 'bowtie2';
+            warn "Aligner (--aligner) not specified. Path to bowtie2 identified and bowtie2 database(s) present: mapping with bowtie2\n";
+        } elsif ( $bowtie1_path_exists and $bowtie1_database_exists ) {
+            $aligner = 'bowtie';
+            warn "Aligner (--aligner) not specified. Path to bowtie identified and bowtie database(s) present: mapping with bowtie\n";
+        } else {
+            die "Aligner (--aligner) not specified. No path to bowtie/bowtie2 identified; and/or no bowtie/bowtie2 databases specified: please adjust configuration file\n";
+        }
+
+        seek( CONF, 0, 0 );    #Return to start of conf file
+    }
+
+    my %libraries_temp_list;    #%{library} = genome    Data structure used to create the @libraries array
+    my %problem_libraries;      #Records libraries which entered multiple times with different paths
+    while (<CONF>) {
+        chomp;
+        s/^\s+//;
+        s/\s+$//;
+
+        next if (/^\#/);
+        next unless ($_);
+
+        my ($name) = split(/\s+/);
+
+        if ( ( $name eq 'BOWTIE' ) and ( $aligner eq 'bowtie' ) ) {
+
+            $path_to_bowtie = ( split( /\s+/, $_, 2 ) )[1];
+
+            die "Empty value set for BOWTIE config parameter\n" unless ($path_to_bowtie);
+
+            warn "Using '$path_to_bowtie' as bowtie path\n" unless ($quiet);
+        }
+
+        elsif ( ( $name eq 'BOWTIE2' ) and ( $aligner eq 'bowtie2' ) ) {
+            $path_to_bowtie2 = ( split( /\s+/, $_, 2 ) )[1];
+
+            die "Empty value set for BOWTIE2 config parameter\n" unless ($path_to_bowtie2);
+
+            warn "Using '$path_to_bowtie2' as bowtie2 path\n" unless ($quiet);
+        }
+
+        elsif ( $name eq 'THREADS' ) {
+            $number_of_threads = ( split(/\s+/) )[1];
+            unless ( $number_of_threads =~ /^\d+$/ ) {
+                die "Invalid number of threads '$number_of_threads set in conf file\n";
+            }
+            warn "Using $number_of_threads threads for searches\n" unless ($quiet);
+        }
+
+        elsif ( $name eq 'DATABASE' ) {
+            my ( undef, $db_name, $db_path ) = split( /\s+/, $_ );
+
+            # Check to see that there's a bowtie or bowtie2 index at that location
+            if ( $aligner eq 'bowtie' ) {
+                unless ( -e "$db_path.1.ebwt" ) {
+                    warn "Skipping DATABASE '$db_name' since no bowtie index was found at '$db_path'\n";
+                    next;
+                }
+            } else {    #Bowtie2
+                unless ( ( -e "$db_path.1.bt2" ) or -e ("$db_path.1.bt2l") ) {
+                    warn "Skipping DATABASE '$db_name' since no bowtie index was found at '$db_path'\n";
+                    next;
+                }
+            }
+
+            if ( exists $libraries_temp_list{$db_name} ) {
+                if ( $db_path ne $libraries_temp_list{$db_name} ) {    #Problem: same database name but different path
+                    $problem_libraries{$db_name} = '';
+                }
+            } else {
+                $libraries_temp_list{$db_name} = $db_path;
+                push( @libraries, [ $db_name, $db_path ] );            #Add here to retain the order of the config file (i.e. don't use the hash %libraries_temp_list)
+            }
+        }
+    }
+
+    if ( scalar keys(%problem_libraries) > 0 ) {
+        foreach my $library ( sort keys %problem_libraries ) {
+            warn "Error: genome '$library' specified multiple times, but with a different path\n";
+        }
+        die "Please adjust the configuration.\n";
+    } else {
+        foreach my $library (@libraries) {
+            my $db_name = $$library[0];
+            warn "Adding database $db_name\n" unless ($quiet);
+        }
+    }
+    close CONF;
+}
+
+sub get_read_length {
+
+    my ($file) = @_;
+
+    #Check if the read file is compressed and open accordingly
+    if ( $file =~ /\.gz$/ ) {
+        open( IN, "zcat \'$file\' |" ) or do {
+            warn "Failed to read $file: $!";
+            return 0;
+        };
+    } else {
+        open( IN, $file ) or do {
+            warn "Failed to read $file: $!";
+            return 0;
+        };
+    }
+
+    my $shortest_length = -1;
+    my $current_count   = 0;
+    while (<IN>) {
+        if (/^@/) {
+            my $seq = scalar <IN>;
+            chomp $seq;
+            if ( $shortest_length < 0 or length $seq < $shortest_length ) {
+                $shortest_length = length $seq;
+            }
+
+            # Skip the rest of the record
+            $_ = scalar <IN>;
+            $_ = scalar <IN>;
+
+            ++$current_count;
+            last if ( $current_count > 1000 );
+        }
+    }
+    return $shortest_length;
+}
+
+sub make_graph {
+
+    my ($file) = @_;
+
+    my $outfile = $file;
+    $outfile =~ s/\.txt$//;
+
+    open( IN, $file ) or die "Can't open data file '$file' to create graph\n";
+
+    my @data;
+    my $percent_no_hits;
+
+    $_ = <IN>;    #Header
+    $_ = <IN>;    #Header
+
+    while (<IN>) {
+        chomp;
+
+        if (/^\s*$/) {
+            next;
+        }
+
+        if (/^\%Hit_no_genomes: (\S+)/) {
+            $percent_no_hits = $1;
+            last;
+        }
+
+        my ( $name, undef, undef, $unmapped, undef, $percent_one_hit_one_library, undef, $percent_multiple_hits_one_library, undef, $percent_one_hit_multiple_libraries, undef, $percent_multiple_hits_multiple_libraries ) = split(/\t/);
+
+        push @{ $data[0] }, $name;
+        push @{ $data[1] }, $percent_one_hit_one_library;
+        push @{ $data[2] }, $percent_multiple_hits_one_library;
+        push @{ $data[3] }, $percent_one_hit_multiple_libraries;
+        push @{ $data[4] }, $percent_multiple_hits_multiple_libraries;
+    }
+
+    close IN;
+
+    #Add a separate bar for the reads that hit none of the libraries
+    push @{ $data[0] }, 'No hits';
+    push @{ $data[1] }, $percent_no_hits;
+    push @{ $data[2] }, '0';
+    push @{ $data[3] }, '0';
+    push @{ $data[4] }, '0';
+
+    my $graph = GD::Graph::bars->new( 75 * @{ $data[0] }, 350 );
+
+    $graph->set_title_font( "$RealBin/OpenSans-Regular.ttf", 12 );
+    $graph->set_legend_font( "$RealBin/OpenSans-Regular.ttf", 8 );
+    $graph->set_x_label_font( "$RealBin/OpenSans-Regular.ttf", 8 );
+    $graph->set_y_label_font( "$RealBin/OpenSans-Regular.ttf", 8 );
+    $graph->set_x_axis_font( "$RealBin/OpenSans-Regular.ttf", 8 );
+    $graph->set_y_axis_font( "$RealBin/OpenSans-Regular.ttf", 8 );
+    $graph->set_text_clr("black");
+
+    $graph->set_legend( 'One hit\one genome', 'Multiple hits\one genome', 'One hit\multiple genomes', 'Multiple hits\multiple genomes' );
+
+    $graph->set(
+        y_label     => '% Mapped',
+        title       => ( ( split( /\//, $outfile ) )[-1] ),
+        y_max_value => 100,
+        bar_spacing => 15,
+        transparent => 0,
+        overwrite   => 1,
+        cumulate    => 1,
+        legendclr   => 'black',
+        dclrs       => [qw(lblue dblue lred dred)],
+    );
+
+    my $gd = $graph->plot( \@data );
+
+    $outfile .= ".png";
+
+    open( IMG, '>', $outfile ) or die "Can't write graph to $outfile: $!";
+    binmode IMG;
+    print IMG $gd->png();
+    close IMG or die "Can't write graph to $outfile: $!";
+}
+
+sub find_no_hits {
+    my ( $index_genomes_ref, $file, $no_hits_filename ) = @_;
+
+    $no_hits_filename =~ s/_screen.txt$//;
+    $no_hits_filename .= '_no_hits.fastq';
+
+    open( IN, '<', $file ) or die "Can't read '$file' : $!";
+
+    if ($nohits_zip_output) {    #Declared outside of subroutine
+        open( OUT, "| gzip -c - > $no_hits_filename.gz" ) or die "Couldn't write to file '$no_hits_filename.gz' : $!";
+    } else {
+        open( OUT, ">$no_hits_filename" ) or die "Could not write to '$no_hits_filename' : $!";
+    }
+
+    while (<IN>) {
+        my $line1 = $_;
+        chomp $line1;
+
+        #Get and remove the sequence ID
+        $line1 = substr( $line1, 1 );    #Remove '@' at start of read
+        my @line1_elements = split( /\./, $line1 );
+        my $seq_id = shift @line1_elements;
+        $line1 = join( '.', @line1_elements );
+        $line1 = '@' . $line1;
+
+        my $read = "$line1\n";
+        $read .= scalar <IN>;
+        $read .= scalar <IN>;
+        $read .= scalar <IN>;
+
+		if(!defined ${$index_genomes_ref}[$seq_id]){    #Does not exist in array - this is possible since array's last entry is last read that mapped (if only mapping reads returned by bowtie)
+			print OUT $read;
+		}elsif ( ${$index_genomes_ref}[$seq_id] == 0 ) {
+            print OUT $read;
+        }
+    }
+    close IN;
+    close OUT or die "Coudn't close filehandle on '$no_hits_filename' : $!";
+}
+
+sub check_bowtie_indices {
+    my ( $path_and_basename, $index_to_check ) = @_;
+
+    my $lookup_suffix;
+    if ( ( $index_to_check =~ /^BOWTIE$/i ) or ( $index_to_check =~ /^BOWTIE1$/i ) ) {
+        $lookup_suffix = 'ebwt';
+    } elsif ( $index_to_check =~ /^BOWTIE2$/i ) {
+        $lookup_suffix = 'bt2';
+    } else {
+        die "Subroutine 'check_bowtie_indices' not given a valid index to check: '$index_to_check'\n";
+    }
+
+    my @files = `ls $path_and_basename*` or die "Could not lookup files '$path_and_basename' in 'check_bowtie_indices' subroutine\n";
+    foreach my $file (@files) {
+
+        chomp $file;
+        my $suffix = ( split( /\./, $file ) )[-1];
+        return 1 if ( $suffix eq $lookup_suffix );    #Aligner index found
+    }
+    return 0;                                         #Aligner index not found
+}
+
+#Subroutine record_hit
+# Takes current value (decimal) and the number of the library
+# Returns new value
+# Binary values stored in units of 2
+# 00 - No hits
+# 01 - 1 hit (X1 means at least 1 hit)
+# 11 - 2 hits (1X means at least 2 hits)
+# So: 110100 -> No hits library1, 1 hit library2, 2+ hits library3
+sub record_hit {
+    my ( $current, $library ) = @_;
+
+    #If maps at least 2, return current value
+    my $pos_lib2 = $library * 2;
+    if ( bit_check( $current, $pos_lib2 ) ) {
+        return $current;
+    }
+
+    #If maps at least 1, adjust flag that so it record maps at least2
+    my $pos_lib1 = $pos_lib2 - 1;
+    my $new_decimal;
+    if ( bit_check( $current, $pos_lib1 ) ) {
+        $new_decimal = bit_or( $current, $pos_lib2 );
+    } else {    #Adjust flag so it records maps at least 1
+        $new_decimal = bit_or( $current, $pos_lib1 );
+    }
+    return $new_decimal;
+}
+
+#Subroutine: maps_which_library
+# Takes current value (decimal) and the number of the library to evaluate
+# Returns:
+# 0 - read not map to library
+# 1 - read maps uniquely to this library but maps to no others
+# 2 - read multi-maps to this library but maps to no others
+# 3 - read maps uniquely to this library and maps to at least one other library
+# 4 - read multi-maps to this library and maps to at least one other library
+sub maps_which_library {
+    my ( $val, $library ) = @_;
+    my $single_map         = 0;
+    my $multi_map          = 0;
+    my $maps_other_library = 0;
+
+    my $pos_lib2 = $library * 2;
+    my $pos_lib1 = $pos_lib2 - 1;
+    my $bitshift_lib1;
+    my $bitshift_lib2;
+    my $bitshift_total;
+    my $new_val;
+
+    if ( bit_check( $val, $pos_lib2 ) ) {    #Multimaps library?
+        $multi_map = 1;
+
+        #Does read map to other libraries
+        $bitshift_lib2 = 1 << ( $pos_lib2 - 1 );
+        $bitshift_lib1 = 1 << ( $pos_lib1 - 1 );
+        $bitshift_total = $bitshift_lib2 | $bitshift_lib1;
+        $maps_other_library = 1 if ( $bitshift_total != $val );
+
+    } elsif ( bit_check( $val, $pos_lib1 ) ) {    #Unique maps library?
+        $single_map = 1;
+
+        #Does read map to other libraries
+        $bitshift_lib1 = 1 << ( $pos_lib1 - 1 );
+        $maps_other_library = 1 if ( $bitshift_lib1 != $val );
+    }
+
+    if ( $multi_map and $maps_other_library ) {
+        return 4;
+    } elsif ( $single_map and $maps_other_library ) {
+        return 3;
+    } elsif ($multi_map) {
+        return 2;
+    } elsif ($single_map) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+#Subroutine: bit_check
+#Takes a decimal number and a position in the binary equivalent (position1 is rightmost)
+#and returns whether it is 0 or 1
+sub bit_check {
+    my ( $decimal, $position ) = @_;
+    my $bitshift = 1 << ( $position - 1 );
+
+    if ( $decimal & $bitshift ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+#Subroutine: bit_or
+#Takes a decimal number and a position in the binary equivalent (position1 is rightmost)
+#and converts 0->1 at that position
+#Returns new (or possibly orignal) decimal value
+sub bit_or {
+    my ( $decimal, $position ) = @_;
+    my $bitshift = 1 << ( $position - 1 );
+
+    my $new_decimal = $decimal | $bitshift;
+    return $new_decimal;
+}
+
+__DATA__
+    
+Fastq Screen - Screen sequences against a panel of databases
+
+Synopsis
+
+  fastq_screen [OPTION]... [FastQ FILE]...
+
+Function
+
+  Fastq Screen is intended to be used as part of a QC pipeline.
+  It allows you to take a sequence dataset and search it
+  against a set of bowtie databases.  It will then generate
+  both a text and a graphical summary of the results to see if
+  the sequence dataset contains the kind of sequences you expect
+  or not.
+
+Options
+
+  --help -h      Print program help and exit
+
+  --subset       Don't use the whole sequence file, but create a 
+                 temporary dataset of this specified number of 
+                 reads. The dataset created will be of 
+                 approximately (within a factor of 2) of this size. 
+                 If the real dataset is smaller than twice the 
+                 specified size then the whole dataset will be used. 
+                 Subsets will be taken evenly from throughout the 
+                 whole original dataset. Default is 100000, but to
+                 process all the data set --subset to 0.
+
+  --outdir       Specify a directory in which to save output files.
+                 If no directory is specified then output files
+                 are saved into the same directory as the input
+                 file.
+
+  --illumina1_3  Assume that the quality values are in encoded in
+                 Illumina v1.3 format. Defaults to Sanger format
+                 if this flag is not specified
+
+  --quiet        Supress all progress reports on stderr and only
+                 report errors
+
+  --version      Print the program version and exit
+
+  --threads      Specify across how many threads bowtie will be
+                 allowed to run. Overrides the default value set
+                 in the conf file
+
+  --conf         Manually specify a location for the configuration
+                 file to be used for this run. If not specified 
+                 then the file will be taken from the same directory 
+                 as the fastq_screen program
+
+  --color        FastQ files are in colorspace. This requires that 
+                 the reference genomes in the config file are 
+                 colorspace indices.
+
+  --bowtie       Specify extra parameters to be passed to bowtie. 
+                 These parameters should be quoted to clearly 
+                 delimit bowtie parameters from fastq_screen 
+                 parameters. You should not try to use this option 
+                 to override the normal search or reporting options 
+                 for bowtie which are set automatically but it might 
+                 be useful to allow reads to be trimmed before
+                 alignment etc.
+
+  --bowtie2      Specify extra parameters to be passed to bowtie 2. 
+                 These parameters should be quoted to clearly 
+                 delimit bowtie2 parameters from fastq_screen 
+                 parameters. You should not try to use this option 
+                 to override the normal search or reporting options 
+                 for bowtie which are set automatically but it might 
+                 be useful to allow reads to be trimmed before
+                 alignment etc.
+
+  --nohits       Writes to a file the sequences that did not map to 
+                 any of the specified genomes. If the subset option 
+				 is also specified, only reads from the temporary 
+				 dataset that failed to align to the reference 
+				 genomes will be written to the output file.
+
+  --aligner     Specify the aligner to use for the mapping. Valid 
+                arguments are 'bowtie' or 'bowtie2'.
+				
+  --force       Do not terminate if output files already exist,
+                instead overwrite the files.

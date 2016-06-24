@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+JRE_HOME=/usr/lib/jvm/java-1.8.0-openjdk-amd64/jre/bin/
+JAVA_HOME=/usr/lib/jvm/java-1.8.0-openjdk-amd64/jre/
+JAVA_PATH=$JAVA_HOME
+
+picard_dir='utils/'
+$JRE_HOME/java -jar ${picard_dir}/picard.jar $*
