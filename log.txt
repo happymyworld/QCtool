@@ -1,0 +1,22 @@
+2016-08-21 19:16:26,247:INFO:root:Launched QC on TestData, using node Auto
+2016-08-21 19:16:26,258:INFO:root:Including FastQC in pipeline, with options:
+2016-08-21 19:16:26,259:INFO:root:	path: utils/FastQC/fastqc
+2016-08-21 19:16:26,259:INFO:root:Including FastQScreen in pipeline, with options:
+2016-08-21 19:16:26,259:INFO:root:	path: utils/fastq_screen
+2016-08-21 19:16:26,259:INFO:root:	conf: genomes/fastq_screen.conf
+2016-08-21 19:16:26,259:INFO:root:Including SolexaQA++ in pipeline, with options:
+2016-08-21 19:16:26,259:INFO:root:	path: utils/SolexaQA++
+2016-08-21 19:16:26,259:INFO:root:	probcutoff: 0.05
+2016-08-21 19:16:26,259:INFO:root:	summary_script_path: utils/cumulative_summary.py
+2016-08-21 19:16:26,259:INFO:root:Including PhiX and adapters removal in pipeline, with options:
+2016-08-21 19:16:26,259:INFO:root:	path_bowtie2: utils/bowtie2/bowtie2
+2016-08-21 19:16:26,259:INFO:root:	x: genomes/phix/phiX
+2016-08-21 19:16:26,259:INFO:root:	path_samtools: utils/samtools
+2016-08-21 19:16:26,260:INFO:root:	path_picard: utils/picard
+2016-08-21 19:16:26,260:INFO:root:	path_fastq-mcf: utils/fastq-mcf
+2016-08-21 19:16:26,260:INFO:root:	adapters_list: genomes/contaminants/contams_forward_rev.fa
+2016-08-21 19:16:26,260:INFO:root:Including Amplicons FLASH test in pipeline, with options:
+2016-08-21 19:16:26,260:INFO:root:	path_FLASH: utils/flash
+2016-08-21 19:16:26,260:INFO:root:	p_cutoff: 0.05
+2016-08-21 19:16:26,260:INFO:root:	log_parser_path: utils/flash_log_parser.py
+2016-08-21 19:16:26,260:INFO:STDOUT:0.05

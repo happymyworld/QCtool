@@ -451,9 +451,10 @@ class FORM(QtGui.QMainWindow, QC_ui.Ui_MainWindow):
 	#                     dialog.setStandardButtons(QtGui.QMessageBox.Yes |QtGui.QMessageBox.No)
 	#                    dialog.setDefaultButton(QtGui.QMessageBox.No)
 	#                   dialog.setIcon(QtGui.QMessageBox.Question)
-			reply = QtGui.QMessageBox.question(self, 'Message', "Are you sure to quit?", QtGui.QMessageBox.Yes | QtGui.QMessageBox.No, QtGui.QMessageBox.No)
+			reply = QtGui.QMessageBox.question(self, 'Message', "Are you Sure to quit?", QtGui.QMessageBox.Yes | QtGui.QMessageBox.No, QtGui.QMessageBox.No)
 			if reply == QtGui.QMessageBox.Yes:
-				os.system('pkill -TERM -P %s;'%(jobid))
+				#os.system('pkill -TERM -P %s;'%(jobid))
+				os.system("for child in $(ps -o pid,ppid -ax | awk '{ if ( $2 == %s ) { print $1 }}') ; do echo \"Killing child process $child because ppid = %s\"; kill $child; done; kill %s"%(jobid, jobid, jobid))
 				os.system("echo 'Stopped on %s' >> %s/%s/QC_log.txt"%(time.time(), self.path_completed, folder_name))                       
 
 
@@ -799,6 +800,11 @@ shopt -s nullglob; fqfiles=(%s/processed/*.fastq*)
                                         '''%(QC_out, QC_out,flash_p,QC_out))
 			else:
 				cmd_file.write('''
+echo "### Progress ### SolexaQA++ BWA analysis\n" >> %s/QC_log.txt; 
+mkdir %s/QCdata/SolexaQA++_BWA
+for file in %s/fQsequences/*.fastq*; do %s analysis -b -d %s/QCdata/SolexaQA++_BWA/ -p %s "$file" 2>&1 | tee -a %s/QC_log.txt; done
+%s -p %s/QCdata/SolexaQA++_BWA/ -f %s/fQsequences/ 2>&1 | tee -a %s/QC_log.txt
+
 echo "### Progress ### FLASH merging\n" >> %s/QC_log.txt;
 mkdir %s/QCdata/FLASH_test_p=%s
 mkdir %s/QCdata/FLASH_test_p=%s/trimmed_%s
@@ -807,7 +813,12 @@ mkdir %s/QCdata/FLASH_test_p=%s/trimmed_%s
 rm -r %s/QCdata/FLASH_test_p=%s/trimmed_%s/*trimmed.segments*
 shopt -s nullglob; fqfiles=(%s/QCdata/FLASH_test_p=%s/trimmed_%s/*.fastq.trimmed*) 
 
-                                        '''%(QC_out, QC_out,flash_p,QC_out,flash_p,flash_p,
+                                        '''%(QC_out, 
+				             QC_out,
+				             QC_out,self.programs_list["SolexaQA++"]['path'],QC_out,flash_p, QC_out,				             
+				             self.programs_list["SolexaQA++"]['summary_script_path'],QC_out,QC_out,QC_out,
+				             QC_out, QC_out,flash_p,QC_out,flash_p,flash_p,
+				             
 				             self.programs_list["SolexaQA++"]['path'],flash_p,QC_out,flash_p,flash_p, QC_out,
 				             QC_out,flash_p,flash_p,
 				             QC_out,flash_p,flash_p))
