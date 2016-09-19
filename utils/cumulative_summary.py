@@ -28,7 +28,7 @@ filename <- "%s/temp_linecount.txt"
 countlines<-read.table(filename, header=FALSE)
 
 subplot(rect(par("usr")[1], par("usr")[3], par("usr")[2], par("usr")[4], col = "white"),x=length(d1$read_length)/10, y=0.32, size=c(1.5,2.2), inset=0)
-subplot(boxplot(countlines$V2, data=countlines,  xaxt='n', yaxt='n', col = "white", bg = "white", outline=FALSE),x=length(d1$read_length)/10, y=0.32, size=c(1.5,2.2), inset=0)
+subplot(boxplot(countlines$V2, data=countlines,  xaxt='n', yaxt='n', ylim=c(0, max(countlines$V2)), col = "white", bg = "white", outline=FALSE),x=length(d1$read_length)/10, y=0.32, size=c(1.5,2.2), inset=0)
 subplot(stripchart(countlines$V2, frame.plot=FALSE, tck=0.02, mgp=c(-1,-1.7,0), cex.axis=0.5, las=1, xaxt='n', vertical = TRUE, method = "jitter", pch = 21, cex=0.7, col='black', bg = cl), x=length(d1$read_length)/10, y=0.32, vadj=0.5, size=c(1.5,2))
 
 				  """%(path))
